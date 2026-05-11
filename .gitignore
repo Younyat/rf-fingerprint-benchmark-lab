@@ -1,0 +1,56 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+.venv/
+venv/
+env/
+
+# Local OS / editor
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# RF datasets and raw captures
+WiFi-Dataset/
+neu_4f197c103/
+neu_m044q5210/
+neu_m046p309d/
+experimento/
+*.dat
+*.bin
+*.cfile
+*.iq
+*.sigmf-data
+
+# Generated ML artifacts
+models/
+reports/
+*.joblib
+*.pkl
+*.pickle
+*.onnx
+*.tflite
+
+# Runtime logs and temp files
+*.log
+*.out
+*.err
+tmp/
+temp/
+
+# Keep source and docs tracked
+!rf_ai_pipeline/
+!rf_ai_pipeline/**
+!README.md
+!.gitignore

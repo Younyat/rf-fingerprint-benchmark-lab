@@ -1,0 +1,159 @@
+<!doctype html>
+<html lang="es">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>RF Fingerprinting Lab</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <header class="topbar">
+      <div>
+        <h1>RF Fingerprinting Lab</h1>
+        <p>Entrenamiento, validacion, prediccion y reentrenamiento reproducible sobre muestras IQ reales.</p>
+      </div>
+      <button id="refreshBtn" class="iconButton" title="Actualizar">↻</button>
+    </header>
+
+    <main class="layout">
+      <aside class="sidebar">
+        <section class="panel">
+          <h2>Dataset</h2>
+          <label>
+            Seleccion
+            <select id="datasetSelect"></select>
+          </label>
+          <div id="datasetMeta" class="metaGrid"></div>
+        </section>
+
+        <section class="panel">
+          <h2>Parametros</h2>
+          <label>
+            Modelo IA
+            <select id="modelKind"></select>
+          </label>
+          <label>
+            Ventana IQ
+            <input id="windowSize" type="number" min="256" step="256" value="4096" />
+          </label>
+          <label>
+            Seleccion de ventanas
+            <select id="windowStrategy">
+              <option value="energy">energia RF</option>
+              <option value="linspace">uniforme</option>
+            </select>
+          </label>
+          <label>
+            Ventanas por archivo
+            <input id="windowsPerFile" type="number" min="1" max="12" value="3" />
+          </label>
+          <label>
+            Test holdout
+            <input id="testSize" type="number" min="0.05" max="0.6" step="0.05" value="0.25" />
+          </label>
+          <label>
+            Max archivos por clase
+            <input id="maxFilesPerClass" type="number" min="1" placeholder="recomendado UAV: 100-300" />
+          </label>
+          <label>
+            Peso max entrenamiento GB
+            <input id="maxDataGb" type="number" min="0.1" step="0.1" placeholder=">= min balanceado" />
+          </label>
+          <label>
+            Porcentaje dataset %
+            <input id="maxDataPercent" type="number" min="0.01" max="100" step="0.01" placeholder="ej. 5" />
+          </label>
+          <div id="dataBudgetPreview" class="hint"></div>
+          <label>
+            Limite total
+            <input id="limitFiles" type="number" min="1" placeholder="sin limite" />
+          </label>
+          <label>
+            Predicciones control
+            <input id="predictionLimit" type="number" min="1" max="50" value="5" />
+          </label>
+          <label>
+            Objetivo IEEE
+            <select id="ieeeTarget">
+              <option value="auto">auto</option>
+              <option value="tx_combo">tx_combo</option>
+              <option value="receiver">receiver</option>
+              <option value="signal_label">signal_label</option>
+              <option value="band">band</option>
+            </select>
+          </label>
+        </section>
+
+        <section class="panel actions">
+          <h2>Operaciones</h2>
+          <button id="presetBtn" class="secondary">Aplicar preset rapido</button>
+          <button id="discoverBtn">Identificar dataset</button>
+          <button id="trainBtn">Entrenar modelo</button>
+          <button id="compareBtn">Comparar tecnicas IA</button>
+          <button id="validateBtn">Ver validacion</button>
+          <button id="retrainBtn">Reentrenar</button>
+          <button id="summaryBtn">Resumen global</button>
+        </section>
+      </aside>
+
+      <section class="workspace">
+        <nav class="tabs">
+          <button class="tab active" data-tab="overview">Rigor</button>
+          <button class="tab" data-tab="metrics">Metricas</button>
+          <button class="tab" data-tab="ranking">Comparacion cientifica</button>
+          <button class="tab" data-tab="predict">Prediccion</button>
+          <button class="tab" data-tab="jobs">Jobs</button>
+        </nav>
+
+        <section id="overview" class="tabPanel active">
+          <div class="band">
+            <h2>Control experimental</h2>
+            <div class="checks">
+              <div><strong>Separacion</strong><span>train/test estratificado por clase y separado por archivo</span></div>
+              <div><strong>Trazabilidad</strong><span>metadatos, binarios IQ, dtype y sample_count en reportes</span></div>
+              <div><strong>Comparacion</strong><span>KNN, SVM, Random Forest, MLP, boosting y ensembles</span></div>
+              <div><strong>Reproducibilidad</strong><span>modelo, parametros y random_state guardados</span></div>
+            </div>
+          </div>
+          <div id="modelCatalogView" class="band"></div>
+          <div id="inventoryView" class="twoCol"></div>
+        </section>
+
+        <section id="metrics" class="tabPanel">
+          <div id="metricsView"></div>
+        </section>
+
+        <section id="ranking" class="tabPanel">
+          <div id="rankingView"></div>
+        </section>
+
+        <section id="predict" class="tabPanel">
+          <div class="split">
+            <section class="panel">
+              <h2>Muestra real</h2>
+              <label>
+                Archivo metadata
+                <select id="sampleSelect"></select>
+              </label>
+              <label>
+                Top K
+                <input id="topK" type="number" min="1" max="10" value="5" />
+              </label>
+              <button id="predictBtn">Predecir dispositivo</button>
+            </section>
+            <section class="panel">
+              <h2>Resultado</h2>
+              <div id="predictionView" class="resultBox"></div>
+            </section>
+          </div>
+        </section>
+
+        <section id="jobs" class="tabPanel">
+          <div id="jobsView"></div>
+        </section>
+      </section>
+    </main>
+
+    <script src="app.js"></script>
+  </body>
+</html>

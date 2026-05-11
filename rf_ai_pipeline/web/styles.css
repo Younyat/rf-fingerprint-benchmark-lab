@@ -1,0 +1,442 @@
+:root {
+  --bg: #f5f7f8;
+  --ink: #182026;
+  --muted: #65727d;
+  --line: #d7dee3;
+  --panel: #ffffff;
+  --accent: #0b6b75;
+  --accent2: #7a4f12;
+  --ok: #1f7a4d;
+  --bad: #aa3030;
+  --warn: #946200;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--ink);
+  font-family: "Segoe UI", Arial, sans-serif;
+  letter-spacing: 0;
+}
+
+.topbar {
+  min-height: 84px;
+  padding: 18px 24px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  border-bottom: 1px solid var(--line);
+  background: #ffffff;
+}
+
+h1,
+h2,
+h3,
+p {
+  margin: 0;
+}
+
+h1 {
+  font-size: 24px;
+  line-height: 1.2;
+}
+
+h2 {
+  font-size: 16px;
+  margin-bottom: 12px;
+}
+
+h3 {
+  font-size: 14px;
+  margin-bottom: 8px;
+}
+
+p {
+  color: var(--muted);
+  margin-top: 6px;
+  font-size: 14px;
+}
+
+.layout {
+  display: grid;
+  grid-template-columns: 340px 1fr;
+  min-height: calc(100vh - 84px);
+}
+
+.sidebar {
+  border-right: 1px solid var(--line);
+  background: #eef2f4;
+  padding: 16px;
+  overflow: auto;
+}
+
+.workspace {
+  padding: 16px 20px 28px;
+  overflow: auto;
+}
+
+.panel,
+.band {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 14px;
+  margin-bottom: 14px;
+}
+
+label {
+  display: block;
+  color: var(--muted);
+  font-size: 12px;
+  margin-bottom: 10px;
+}
+
+.hint {
+  color: var(--muted);
+  background: #f7f9fc;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  font-size: 12px;
+  line-height: 1.35;
+  padding: 8px 9px;
+  margin: -2px 0 10px;
+}
+
+select,
+input,
+button {
+  width: 100%;
+  min-height: 36px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: #ffffff;
+  color: var(--ink);
+  font: inherit;
+  padding: 7px 9px;
+  margin-top: 4px;
+}
+
+button {
+  background: var(--accent);
+  color: #ffffff;
+  border-color: var(--accent);
+  cursor: pointer;
+  font-weight: 600;
+}
+
+button:hover {
+  filter: brightness(0.96);
+}
+
+button.secondary {
+  background: #ffffff;
+  color: var(--accent);
+}
+
+.recommendationBox {
+  background: #fff8e5;
+  border: 1px solid #f0c766;
+  border-radius: 8px;
+  margin-top: 12px;
+  padding: 12px;
+}
+
+.recommendationBox table {
+  margin-top: 8px;
+}
+
+.recommendationActions {
+  display: grid;
+  gap: 8px;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  margin-top: 10px;
+}
+
+.iconButton {
+  width: 42px;
+  height: 42px;
+  font-size: 22px;
+  padding: 0;
+}
+
+.actions button {
+  margin-bottom: 8px;
+}
+
+.tabs {
+  display: flex;
+  gap: 8px;
+  border-bottom: 1px solid var(--line);
+  margin-bottom: 16px;
+}
+
+.tab {
+  width: auto;
+  min-width: 110px;
+  background: transparent;
+  color: var(--muted);
+  border: 0;
+  border-bottom: 3px solid transparent;
+  border-radius: 0;
+}
+
+.tab.active {
+  color: var(--accent);
+  border-bottom-color: var(--accent);
+}
+
+.tabPanel {
+  display: none;
+}
+
+.tabPanel.active {
+  display: block;
+}
+
+.metaGrid,
+.statsGrid,
+.checks,
+.twoCol,
+.split {
+  display: grid;
+  gap: 12px;
+}
+
+.metaGrid,
+.statsGrid {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.wideStats {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.checks {
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+}
+
+.twoCol,
+.split {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.checks div,
+.metric,
+.sample,
+.job,
+.kv {
+  background: #f8fafb;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 10px;
+}
+
+strong {
+  display: block;
+  font-size: 13px;
+}
+
+span,
+.small {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.value {
+  color: var(--ink);
+  font-size: 22px;
+  font-weight: 700;
+  margin-top: 4px;
+}
+
+.status {
+  display: inline-block;
+  padding: 3px 8px;
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 700;
+  color: #ffffff;
+  background: var(--muted);
+}
+
+.status.completed {
+  background: var(--ok);
+}
+
+.status.failed {
+  background: var(--bad);
+}
+
+.status.running,
+.status.queued {
+  background: var(--warn);
+}
+
+.progressHeader {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-top: 10px;
+}
+
+.progressHeader strong {
+  color: var(--ink);
+  display: inline;
+  font-size: 12px;
+}
+
+.progressBar {
+  background: #dfe7ee;
+  border-radius: 999px;
+  height: 12px;
+  margin-top: 6px;
+  overflow: hidden;
+}
+
+.progressBar div {
+  background: #16a34a;
+  height: 100%;
+  transition: width 0.25s ease;
+}
+
+.progressData {
+  color: var(--muted);
+  font-size: 12px;
+  margin-top: 5px;
+}
+
+.matrix {
+  overflow: auto;
+}
+
+table {
+  width: 100%;
+  border-collapse: collapse;
+  background: #ffffff;
+  border: 1px solid var(--line);
+}
+
+th,
+td {
+  border-bottom: 1px solid var(--line);
+  padding: 8px;
+  text-align: left;
+  font-size: 12px;
+  vertical-align: top;
+}
+
+th {
+  background: #edf3f4;
+}
+
+pre {
+  overflow: auto;
+  background: #101820;
+  color: #f5f7f8;
+  border-radius: 8px;
+  padding: 12px;
+  max-height: 360px;
+  font-size: 12px;
+}
+
+.resultBox {
+  min-height: 180px;
+}
+
+.probBar {
+  height: 10px;
+  background: #d9e3e5;
+  border-radius: 999px;
+  overflow: hidden;
+  margin-top: 5px;
+}
+
+.probBar div {
+  height: 100%;
+  background: var(--accent2);
+}
+
+.scientificNote {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 14px;
+  margin-bottom: 14px;
+  background: #ffffff;
+}
+
+.scientificNote p {
+  margin-top: 8px;
+}
+
+.warnNote {
+  border-color: #d6a63f;
+  background: #fff8e6;
+}
+
+.okNote {
+  border-color: #7bb89b;
+  background: #eef8f3;
+}
+
+.chartGrid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.chartRow {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 10px;
+  background: #f8fafb;
+}
+
+.chartMetric {
+  margin-top: 8px;
+}
+
+.bar {
+  height: 9px;
+  border-radius: 999px;
+  background: #d8e1e5;
+  overflow: hidden;
+  margin-top: 4px;
+}
+
+.bar div {
+  height: 100%;
+  background: var(--accent);
+}
+
+.okBar div {
+  background: var(--ok);
+}
+
+.f1Bar div {
+  background: #6356a3;
+}
+
+.timeBar div {
+  background: var(--accent2);
+}
+
+@media (max-width: 980px) {
+  .layout,
+  .twoCol,
+  .split,
+  .checks,
+  .wideStats,
+  .chartGrid {
+    grid-template-columns: 1fr;
+  }
+
+  .sidebar {
+    border-right: 0;
+    border-bottom: 1px solid var(--line);
+  }
+}
