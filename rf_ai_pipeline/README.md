@@ -1,106 +1,100 @@
 # RF Device Fingerprinting Pipeline
 
-Este flujo crea tres modelos supervisados, uno por dataset:
+Pipeline local para inventariar datasets RF, entrenar modelos de identificacion de dispositivos, validar resultados, comparar tecnicas y ejecutar prediccion sobre muestras reales I/Q.
 
-- `kri_wifi`: identifica el USRP X310 transmisor desde archivos SigMF WiFi (`3123D52`, `3123D54`, etc.).
-- `uav_lightbridge`: identifica el UAV/dispositivo DJI M100 desde bursts `cf16_le`.
-- `ieee_cbrs`: intenta identificar emisores/receptores desde metadatos SigMF; si solo hay una identidad de dispositivo, se puede entrenar por `--ieee-target band` como control de pipeline.
+## Datasets soportados
 
-## Comandos
+- `kri_wifi`: SigMF WiFi con transmisores USRP X310 (`3123D52`, `3123D54`, etc.), dtype `cf32`.
+- `uav_lightbridge`: bursts DJI/UAV Lightbridge, dtype `cf16_le`.
+- `ieee_cbrs`: SigMF IEEE/CBRS, dtype `cf32_le`; puede usarse con `ieee_target=band` u otros objetivos si no hay suficientes identidades de dispositivo.
+- `wifi_dat_day`: archivos `.dat` crudos en `WiFi-Dataset/Indoor/Day_1/Device_*`, dtype `cf32`.
 
-Inventario:
-
-```powershell
-python rf_ai_pipeline\rf_device_pipeline.py discover --dataset kri_wifi
-python rf_ai_pipeline\rf_device_pipeline.py discover --dataset uav_lightbridge
-python rf_ai_pipeline\rf_device_pipeline.py discover --dataset ieee_cbrs --limit-files 500
-```
-
-Entrenamiento y validacion con muestras reales:
-
-```powershell
-python rf_ai_pipeline\rf_device_pipeline.py train --dataset kri_wifi --model-kind random_forest --window-size 4096 --windows-per-file 3
-python rf_ai_pipeline\rf_device_pipeline.py train --dataset uav_lightbridge --model-kind svm_rbf --max-files-per-class 120 --window-size 4096 --windows-per-file 2
-python rf_ai_pipeline\rf_device_pipeline.py train --dataset ieee_cbrs --model-kind extra_trees --max-files-per-class 200 --ieee-target band --window-size 4096 --windows-per-file 2
-```
-
-Modelos disponibles para comparar:
-
-- `knn`: baseline de vecinos, como en trabajos con fingerprints manuales.
-- `svm_linear`: separabilidad lineal de features RF.
-- `svm_rbf`: SVM no lineal, fuerte en datasets medianos.
-- `random_forest`: ensemble de arboles para features tabulares.
-- `extra_trees`: ensemble mas aleatorizado.
-- `logistic_regression`: baseline probabilistico lineal.
-- `mlp`: red neuronal densa ligera sobre features IQ/espectrales.
-- `hist_gradient_boosting`: boosting no lineal para features tabulares.
-
-Ejemplo de comparacion manual:
-
-```powershell
-python rf_ai_pipeline\rf_device_pipeline.py train --dataset uav_lightbridge --model-kind knn --max-files-per-class 80 --window-size 4096 --windows-per-file 2
-python rf_ai_pipeline\rf_device_pipeline.py train --dataset uav_lightbridge --model-kind svm_rbf --max-files-per-class 80 --window-size 4096 --windows-per-file 2
-python rf_ai_pipeline\rf_device_pipeline.py train --dataset uav_lightbridge --model-kind mlp --max-files-per-class 80 --window-size 4096 --windows-per-file 2
-python rf_ai_pipeline\rf_device_pipeline.py summary
-```
-
-Prediccion:
-
-```powershell
-python rf_ai_pipeline\rf_device_pipeline.py predict --model models\kri_wifi_device_model.joblib --meta neu_m044q5210\KRI-16Devices-RawData\14ft\WiFi_air_X310_3123D52_14ft_run1.sigmf-meta
-```
-
-Reentrenamiento:
-
-```powershell
-python rf_ai_pipeline\rf_device_pipeline.py retrain --dataset kri_wifi --window-size 4096 --windows-per-file 3
-```
-
-Resumen:
-
-```powershell
-python rf_ai_pipeline\rf_device_pipeline.py summary
-```
-
-Los modelos se guardan en `models/` y los reportes de validacion en `reports/`.
-
-## Interfaz web local
-
-Arranque:
+## Arranque web
 
 ```powershell
 python rf_ai_pipeline\web_app.py --host 127.0.0.1 --port 8080
 ```
 
-Abra:
+Abrir:
 
 ```text
 http://127.0.0.1:8080
 ```
 
-La interfaz permite:
+La interfaz permite seleccionar dataset, modelo, ventana I/Q, seleccion de ventanas, presupuesto por GB o porcentaje, numero de predicciones de control y objetivo de etiquetas IEEE.
 
-- seleccionar `kri_wifi`, `uav_lightbridge` o `ieee_cbrs`;
-- seleccionar tecnica IA concreta o comparar todas las tecnicas disponibles;
-- generar inventario del dataset con clases, dtype, sample_count y ejemplos;
-- entrenar y reentrenar modelos con parametros controlados;
-- revisar accuracy holdout, balanced accuracy, macro-F1, precision, recall, matriz de confusion y predicciones de control;
-- seleccionar una muestra real del dataset y ejecutar prediccion contra el modelo guardado;
-- ver jobs, errores y JSON de resultados para reproducibilidad.
+## Logica de botones
 
-## Comparacion rigurosa de tecnicas IA
+### Train from scratch
 
-La pestaña `Comparacion cientifica` esta dedicada solo a comparar modelos. El boton `Comparar tecnicas IA` ejecuta un protocolo completo por cada modelo:
+`Train from scratch` crea una nueva version desde cero con los parametros actuales: dataset, split, features, ventanas, presupuesto, modelo y seed.
 
-1. Entrena el modelo con los parametros seleccionados.
-2. Reentrena el mismo modelo con otra semilla para medir estabilidad.
-3. Ejecuta predicciones sobre muestras reales etiquetadas del dataset.
-4. Cuenta aciertos y fallos de prediccion.
-5. Mide tiempo de entrenamiento, reentrenamiento, inferencia media y tiempo total.
-6. Calcula un ranking ponderado.
-7. Guarda el benchmark en `reports/<dataset>_benchmark.json`.
+Siempre se conserva una version trazable en:
 
-Score usado en el ranking:
+```text
+models/versions/<dataset>/<modelo>/<dataset>_<modelo>_<version>.joblib
+models/versions/<dataset>/<modelo>/<dataset>_<modelo>_<version>.pt
+```
+
+Tambien se actualiza el alias operativo usado por prediccion rapida:
+
+```text
+models/<dataset>_<modelo>_model.joblib
+models/<dataset>_<modelo>_model.pt
+```
+
+### Retrain
+
+`Retrain` vuelve a entrenar un modelo existente con nueva seed, nuevos datos, mas ventanas, otro presupuesto o configuracion distinta.
+
+El reporte registra:
+
+- `training_action = retrain`;
+- `base_model_path`;
+- `base_report_path`;
+- `base_metrics`;
+- `model_version`;
+- `random_state`;
+- `trained_at`;
+- metricas comparables contra la version anterior.
+
+### Compare
+
+`Comparar tecnicas IA` por defecto solo evalua modelos ya entrenados. No entrena ni reentrena en silencio.
+
+El campo `Modo de comparacion` tiene tres opciones:
+
+- `Solo evaluar modelos ya entrenados`: no modifica modelos ni reportes de validacion.
+- `Reentrenar copia experimental`: toma el modelo actual como base, entrena una version experimental y no pisa el alias operativo.
+- `Train from scratch + retrain experimental`: crea un train desde cero y un retrain experimental para medir estabilidad; tampoco pisa el alias operativo.
+
+El modo normal ejecuta:
+
+1. cargar modelos existentes;
+2. leer metricas originales guardadas;
+3. ejecutar predicciones de control;
+4. contar aciertos y fallos;
+5. medir tiempo de inferencia;
+6. generar ranking global y ranking por familia.
+
+Score normal:
+
+```text
+0.40 * macro_f1_original
++ 0.25 * balanced_accuracy_original
++ 0.20 * accuracy_original
++ 0.15 * prediction_accuracy
+```
+
+Si se usa un modo experimental, el benchmark queda marcado como:
+
+```text
+benchmark_train_from_scratch
+benchmark_retrain_existing_stability
+benchmark_retrain_stability
+```
+
+Score con estabilidad:
 
 ```text
 0.35 * macro_f1_retrain
@@ -110,67 +104,160 @@ Score usado en el ranking:
 + 0.05 * (1 - stability_gap_macro_f1)
 ```
 
-Esto evita comparar solo por accuracy. El ranking favorece modelos que funcionan bien por clase, aguantan el reentrenamiento y aciertan predicciones reales de control.
+## Modelos disponibles
 
-La tabla comparativa muestra por modelo:
+Modelos clasicos y baselines:
 
-- ranking y score;
-- aciertos/fallos de prediccion sobre muestras reales;
-- accuracy de prediccion de control;
-- macro-F1 en train inicial y retrain;
-- balanced accuracy del retrain;
-- gap de estabilidad entre train y retrain;
-- tiempo de entrenamiento;
-- tiempo de reentrenamiento;
-- tiempo medio de prediccion;
-- tiempo total del benchmark.
+- `knn`
+- `svm_linear`
+- `svm_rbf`
+- `random_forest`
+- `extra_trees`
+- `logistic_regression`
+- `mlp`
+- `hist_gradient_boosting`
 
-La pagina tambien incluye:
+Modelos deep learning sobre I/Q crudo:
 
-- graficas de barras para score, prediccion, Macro-F1 y coste temporal;
-- lectura critica automatica cuando hay contradicciones entre metricas;
-- aviso si el mejor modelo tiene Macro-F1 bajo o poca estabilidad;
-- predicciones de control tomadas del holdout del reentrenamiento, no de muestras arbitrarias del dataset;
-- split estratificado por clase y separado por archivo/captura para reducir fuga de informacion y mantener representacion de dispositivos.
+- `cnn1d_iq`
+- `lstm_iq`
+- `transformer_iq`
 
-## Modelos guardados y prediccion
+Los modelos clasicos se guardan como `.joblib`. Los modelos deep learning se guardan como `.pt` de PyTorch.
 
-Cada modelo queda guardado por dataset y tecnica:
+## Familias cientificas de modelos
+
+El benchmark normaliza cada tecnica con `model_family`:
 
 ```text
-models/<dataset>_<model_kind>_model.joblib
-reports/<dataset>_<model_kind>_validation.json
+machine_learning_classical: knn, svm_linear, svm_rbf, random_forest, extra_trees
+linear_baseline: logistic_regression
+boosting: hist_gradient_boosting
+dense_neural_network: mlp
+deep_learning_iq: cnn1d_iq, lstm_iq, transformer_iq
 ```
 
-La interfaz carga esos modelos desde `/api/models?dataset=<dataset>` y muestra sus ultimas metricas en `Metricas > Modelos entrenados guardados`.
+Por familia se calcula:
 
-La prediccion usa el modelo seleccionado en `Modelo IA`. Si existe `models/<dataset>_<model_kind>_model.joblib`, se usa ese archivo. Si no existe, se muestra en la tabla que no hay modelo para esa tecnica.
+- numero de modelos;
+- mejor modelo;
+- mejor score;
+- media de score;
+- media de Macro-F1;
+- media de balanced accuracy;
+- media de prediction accuracy;
+- tiempo total medio;
+- tiempo total acumulado.
 
-Cada dataset mantiene su propia serie de modelos. Los archivos se guardan con el patron:
+La pestana `Comparacion cientifica` muestra ranking global, ranking por familia, mejor modelo por familia y una alerta si `deep_learning_iq` no supera al mejor ML clasico.
+
+## Reportes generados
+
+Por entrenamiento:
 
 ```text
-models/<dataset>_<modelo>_model.joblib
 reports/<dataset>_<modelo>_validation.json
+reports/<dataset>_validation.json
+reports/<dataset>_<modelo>_history.json
+reports/model_training_history.json
 ```
 
-La serie mostrada en `Metricas` es:
+Por benchmark:
 
 ```text
-hist_gradient_boosting
-random_forest
-extra_trees
-mlp
-svm_rbf
-knn
-svm_linear
-logistic_regression
+reports/<dataset>_benchmark.json
+reports/<dataset>_benchmark.md
 ```
 
-Cambiar de dataset no sobreescribe modelos de otro dataset. Entrenar `kri_wifi_random_forest` no toca `uav_lightbridge_random_forest`.
+Campos importantes en los reportes:
 
-## Dataset `.dat` local: WiFi-Dataset
+- `training_action`;
+- `model_version`;
+- `versioned_model_path`;
+- `model_path`;
+- `model_size_bytes`;
+- `random_state`;
+- `trained_at`;
+- `dataset`;
+- `model_kind`;
+- `model_family`;
+- `requested_max_data_percent`;
+- `requested_max_data_gb`;
+- `requested_max_data_bytes`;
+- `windows`;
+- `records_used`;
+- `estimated_iq_gb_read`;
+- `referenced_data_size_bytes`;
+- `holdout_accuracy`;
+- `balanced_accuracy`;
+- `macro_f1`;
+- `confusion_matrix`;
+- `sample_predictions`;
+- `base_metrics` si es reentrenamiento.
 
-Se detecto un dataset crudo en:
+## Metricas mostradas
+
+La interfaz muestra:
+
+- accuracy holdout;
+- balanced accuracy;
+- Macro-F1;
+- precision/recall por clase;
+- matriz de confusion;
+- aciertos/fallos de prediccion de control;
+- confianza de predicciones;
+- tiempo medio de inferencia;
+- tiempo total de benchmark;
+- peso de modelo;
+- GB referenciados;
+- GB leidos estimados;
+- historial de aprendizaje por modelo.
+
+## Historial de aprendizaje
+
+Cada entrenamiento o reentrenamiento anade una entrada a:
+
+```text
+reports/<dataset>_<modelo>_history.json
+reports/model_training_history.json
+```
+
+La pestana `Metricas` dibuja curvas de:
+
+- Macro-F1 por ejecucion;
+- accuracy holdout por ejecucion;
+- balanced accuracy por ejecucion;
+- loss por epoca para `cnn1d_iq`, `lstm_iq` y `transformer_iq`.
+
+Esto ayuda a ver si el modelo mejora realmente con nuevas configuraciones o si solo cambia por azar del split/seed.
+
+## Presupuesto por GB o porcentaje
+
+La interfaz calcula el peso total del dataset y permite limitar el entrenamiento con:
+
+```text
+Peso max entrenamiento GB
+Porcentaje dataset %
+```
+
+Reglas:
+
+- Si se define porcentaje y GB queda vacio, se calcula el presupuesto a partir del peso total del dataset.
+- Si se definen GB y porcentaje, manda el valor en GB.
+- Si ambos quedan vacios, se usan todos los archivos elegibles.
+- El presupuesto por GB/% tiene prioridad sobre `Limite total` y `Max archivos por clase`.
+
+El limite se aplica a archivos IQ completos, no a bytes sueltos dentro del archivo. Por eso el reporte separa:
+
+- `Presupuesto`: cantidad pedida.
+- `GB referenciados`: peso completo de los archivos seleccionados.
+- `GB leidos est.`: bytes realmente leidos para extraer ventanas I/Q.
+
+En datasets con archivos grandes, como `kri_wifi`, es normal leer pocos MB aunque los archivos referenciados pesen varios GB, porque el pipeline entrena con ventanas y no con todo el archivo.
+
+## Dataset `.dat`: WiFi-Dataset
+
+Ruta esperada:
 
 ```text
 WiFi-Dataset/Indoor/Day_1/Device_1/tx_1_iq.dat
@@ -181,20 +268,20 @@ WiFi-Dataset/Indoor/Day_1/Device_5/tx_1_iq (4).dat
 WiFi-Dataset/Indoor/Day_1/Device_6/tx_1_iq (5).dat
 ```
 
-Cada archivo pesa 400 MB. El formato inferido es `cf32` little-endian: pares `float32` intercalados como I/Q. Cada archivo contiene aproximadamente 50.000.000 muestras complejas.
-
-El pipeline lo registra como:
+Formato inferido:
 
 ```text
 dataset = wifi_dat_day
-dtype = cf32
 extension = .dat
+dtype = cf32
 label = Device_1 ... Device_6
 ```
 
-En esta estructura, cada carpeta `Device_*` se usa como etiqueta de dispositivo. Como solo hay un archivo por dispositivo, el pipeline usa validacion estratificada por ventanas dentro de cada archivo para este dataset. Es una validacion util para probar el lector `.dat`, pero menos estricta que separar capturas completas entre train/test.
+`cf32` significa pares `float32` intercalados como I/Q little-endian.
 
-Si en el futuro varios dispositivos estan dentro del mismo `.dat`, hace falta un manifiesto de segmentos. El pipeline soporta:
+Como hay pocos archivos por dispositivo, la validacion de `wifi_dat_day` es estratificada por ventanas dentro del archivo. Es util para probar el lector `.dat`, pero es menos estricta que separar capturas completas entre train/test.
+
+Si varios dispositivos estan dentro del mismo `.dat`, crear:
 
 ```text
 WiFi-Dataset/labels.csv
@@ -209,76 +296,58 @@ Indoor/Day_1/tx_1_iq.dat,device_002,5000000,10000000,cf32
 Indoor/Day_1/tx_1_iq.dat,device_003,10000000,15000000,cf32
 ```
 
-Tambien se aceptan nombres equivalentes: `path` o `file` en vez de `data_path`, y `device_id`, `device` o `tx` en vez de `label`.
-
-Sin `labels.csv`, el pipeline solo puede etiquetar por `Day_1 ... Day_6` o por `tx_1` inferido del nombre del archivo. Para fingerprinting real de dispositivos dentro de `Day_1`, el `labels.csv` debe indicar que rango de muestras pertenece a cada dispositivo.
-
-Para KRI WiFi, si el Macro-F1 es bajo, no basta con reentrenar igual. Pruebe primero:
-
-```powershell
-python rf_ai_pipeline\rf_device_pipeline.py train --dataset kri_wifi --model-kind extra_trees --window-strategy energy --window-size 32768 --windows-per-file 6
-```
-
-En la interfaz use `Seleccion de ventanas = energia RF`, `Ventana IQ = 32768` o `65536`, y aumente `Ventanas por archivo`.
-
-## Entrenamiento por peso o porcentaje del dataset
-
-La interfaz muestra el peso total de cada dataset y permite limitar el entrenamiento con `Peso max entrenamiento GB` o `Porcentaje dataset %`.
-
-Ejemplos:
-
-```text
-Peso max entrenamiento GB = 1
-Peso max entrenamiento GB = 2
-Peso max entrenamiento GB = 3
-Porcentaje dataset % = 5
-Porcentaje dataset % = 10
-```
-
-Si el campo GB queda vacio y se define un porcentaje, la interfaz calcula automaticamente cuantos MB/GB representa sobre el total del dataset. Si se rellenan GB y porcentaje a la vez, manda el valor en GB. Si ambos quedan vacios, se usan todos los archivos elegibles.
-
-Cuando se usa presupuesto por GB o por porcentaje, ese presupuesto tiene prioridad sobre `Limite total` y `Max archivos por clase`. Esto evita pedir, por ejemplo, 10% del dataset y que el experimento se corte accidentalmente por `Limite total = 10`.
-
-El limite se aplica a archivos IQ completos, no a bytes sueltos dentro de un archivo. Por eso el reporte separa:
-
-- `Presupuesto`: cantidad pedida por GB o porcentaje.
-- `GB referenciados`: peso completo de los archivos seleccionados.
-- `GB leidos est.`: bytes realmente leidos al extraer ventanas IQ.
-
-En datasets con archivos grandes, como `kri_wifi`, es normal ver pocos MB/GB leidos aunque los archivos referenciados pesen varios GB: el pipeline no entrena con el archivo entero, sino con ventanas extraidas de cada captura. Esto evita tiempos enormes, pero debe documentarse en el reporte para justificar el experimento.
-
-Para `uav_lightbridge`, el peso total no parece enorme, pero hay 13.893 archivos pequenos. El coste fuerte es abrir miles de JSON/binarios y extraer ventanas/features de cada burst. Para pruebas rapidas use:
-
-```text
-Max archivos por clase = 100
-Peso max entrenamiento GB = vacio
-Ventanas por archivo = 1 o 2
-```
-
-Para una comparacion mas seria pero todavia razonable:
-
-```text
-Max archivos por clase = 300
-Ventanas por archivo = 2
-```
-
-Evite usar todo `uav_lightbridge` en `Comparar tecnicas IA` salvo que quiera esperar mucho tiempo, porque compara 8 modelos y cada uno hace train + retrain + predicciones.
+Tambien se aceptan `path` o `file` en vez de `data_path`, y `device_id`, `device` o `tx` en vez de `label`.
 
 ## Recomendaciones accionables
 
-La pestaña `Comparacion cientifica` no solo muestra una lectura critica. Si el reporte detecta Macro-F1 bajo, baja prediccion de control o inestabilidad entre train y retrain, la interfaz genera un bloque de medidas recomendadas.
+Si el reporte detecta Macro-F1 bajo, baja prediccion de control o inestabilidad, la interfaz muestra un bloque de medidas recomendadas.
 
-Botones disponibles:
+Botones:
 
-- `Adoptar mejoras en parametros`: cambia el formulario para el siguiente entrenamiento, reentrenamiento o comparacion.
-- `Adoptar y comparar otra vez`: aplica los cambios y lanza de nuevo la comparacion cientifica.
+- `Adoptar mejoras en parametros`: cambia el formulario para el siguiente train, retrain o compare.
+- `Adoptar y comparar otra vez`: aplica cambios y lanza de nuevo la comparacion.
 
-Ejemplo para `kri_wifi` con Macro-F1 bajo: se activa seleccion por energia RF, ventana IQ mayor, mas ventanas por archivo y mas predicciones de control.
+Ejemplo para `kri_wifi` con Macro-F1 bajo:
 
-Equivalente por CLI:
-
-```powershell
-python rf_ai_pipeline\rf_device_pipeline.py train --dataset uav_lightbridge --model-kind extra_trees --max-data-gb 1 --window-size 4096 --windows-per-file 2
+```text
+Seleccion de ventanas = energia RF
+Ventana IQ = 32768 o 65536
+Ventanas por archivo >= 6
+Predicciones control >= 20
 ```
 
-Nota cientifica: `ieee_cbrs` no expone multiples identidades de dispositivo con `--ieee-target auto` en las muestras verificadas; para ese dataset el front permite usar `band` u otros objetivos de metadatos como control de pipeline, pero eso no debe reportarse como identificacion unica de dispositivo.
+## CLI basico
+
+Inventario:
+
+```powershell
+python rf_ai_pipeline\rf_device_pipeline.py discover --dataset kri_wifi
+python rf_ai_pipeline\rf_device_pipeline.py discover --dataset uav_lightbridge
+python rf_ai_pipeline\rf_device_pipeline.py discover --dataset ieee_cbrs --limit-files 500
+```
+
+Entrenamiento:
+
+```powershell
+python rf_ai_pipeline\rf_device_pipeline.py train --dataset kri_wifi --model-kind extra_trees --window-strategy energy --window-size 32768 --windows-per-file 6
+python rf_ai_pipeline\rf_device_pipeline.py train --dataset uav_lightbridge --model-kind random_forest --max-files-per-class 300 --window-size 4096 --windows-per-file 2
+python rf_ai_pipeline\rf_device_pipeline.py train --dataset wifi_dat_day --model-kind cnn1d_iq --window-size 32768 --windows-per-file 3
+```
+
+Prediccion:
+
+```powershell
+python rf_ai_pipeline\rf_device_pipeline.py predict --model models\kri_wifi_extra_trees_model.joblib --meta neu_m044q5210\KRI-16Devices-RawData\14ft\WiFi_air_X310_3123D52_14ft_run1.sigmf-meta
+```
+
+Resumen:
+
+```powershell
+python rf_ai_pipeline\rf_device_pipeline.py summary
+```
+
+## Nota cientifica
+
+Un resultado alto con split aleatorio o por ventanas no demuestra necesariamente fingerprinting robusto. Para justificar identificacion real de dispositivos hay que controlar fuga por captura, sesion, dia, receptor, distancia, canal y SNR.
+
+`Compare` normal sirve para evaluar modelos guardados. `Compare with retraining stability test` sirve para medir estabilidad experimental, pero debe reportarse como reentrenamiento experimental, no como simple evaluacion.

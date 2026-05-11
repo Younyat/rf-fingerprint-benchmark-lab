@@ -32,6 +32,17 @@
             Modelo IA
             <select id="modelKind"></select>
           </label>
+          <div class="compareModelPicker">
+            <div class="pickerHeader">
+              <strong>Modelos incluidos en comparacion</strong>
+              <div>
+                <button id="selectAllModelsBtn" type="button" class="miniBtn">Todos</button>
+                <button id="clearModelsBtn" type="button" class="miniBtn secondary">Ninguno</button>
+              </div>
+            </div>
+            <div id="compareModelList" class="checkGrid"></div>
+            <div class="hint">Train/Retrain usa solo `Modelo IA`. Comparar usa esta lista seleccionada.</div>
+          </div>
           <label>
             Ventana IQ
             <input id="windowSize" type="number" min="256" step="256" value="4096" />
@@ -88,8 +99,16 @@
           <h2>Operaciones</h2>
           <button id="presetBtn" class="secondary">Aplicar preset rapido</button>
           <button id="discoverBtn">Identificar dataset</button>
-          <button id="trainBtn">Entrenar modelo</button>
+          <button id="trainBtn">Train from scratch</button>
           <button id="compareBtn">Comparar tecnicas IA</button>
+          <label>
+            Modo de comparacion
+            <select id="compareMode">
+              <option value="evaluate_existing">Solo evaluar modelos ya entrenados</option>
+              <option value="retrain_existing_stability">Reentrenar copia experimental</option>
+              <option value="train_from_scratch_stability">Train from scratch + retrain experimental</option>
+            </select>
+          </label>
           <button id="validateBtn">Ver validacion</button>
           <button id="retrainBtn">Reentrenar</button>
           <button id="summaryBtn">Resumen global</button>

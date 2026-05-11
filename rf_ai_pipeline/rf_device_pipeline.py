@@ -12,6 +12,9 @@ from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 
 import joblib
 import numpy as np
+import torch
+from torch import nn
+from torch.utils.data import DataLoader, TensorDataset
 from sklearn.ensemble import ExtraTreesClassifier, HistGradientBoostingClassifier, RandomForestClassifier
 from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import accuracy_score, balanced_accuracy_score, classification_report, confusion_matrix, f1_score
@@ -26,6 +29,43 @@ from sklearn.svm import SVC
 ROOT = Path(__file__).resolve().parents[1]
 MODELS_DIR = ROOT / "models"
 REPORTS_DIR = ROOT / "reports"
+MODEL_VERSIONS_DIR = MODELS_DIR / "versions"
+DEEP_MODEL_KINDS = {"cnn1d_iq", "lstm_iq", "transformer_iq"}
+DEEP_INPUT_SAMPLES = 4096
+DEEP_EPOCHS = 12
+DEEP_BATCH_SIZE = 32
+
+
+def model_extension(model_kind: str) -> str:
+    return ".pt" if model_kind in DEEP_MODEL_KINDS else ".joblib"
+
+
+def normalized_training_action(args: argparse.Namespace, default: str = "train_from_scratch") -> str:
+    return str(getattr(args, "training_action", None) or default)
+
+
+def make_model_version(action: str, seed: int) -> str:
+    safe_action = re.sub(r"[^a-zA-Z0-9_]+", "_", action).strip("_") or "train"
+    return f"{datetime.utcnow().strftime('%Y%m%dT%H%M%SZ')}_{safe_action}_seed{int(seed)}"
+
+
+def versioned_model_path(dataset: str, model_kind: str, model_version: str) -> Path:
+    return MODEL_VERSIONS_DIR / dataset / model_kind / f"{dataset}_{model_kind}_{model_version}{model_extension(model_kind)}"
+
+
+def versioned_report_path(dataset: str, model_kind: str, model_version: str) -> Path:
+    return REPORTS_DIR / "versions" / dataset / model_kind / f"{dataset}_{model_kind}_{model_version}_validation.json"
+
+
+def load_optional_report(path_value: Optional[str]) -> Optional[dict]:
+    if not path_value:
+        return None
+    path = Path(path_value)
+    if not path.is_absolute():
+        path = ROOT / path
+    if not path.exists():
+        return None
+    return json.loads(path.read_text(encoding="utf-8"))
 
 
 @dataclass(frozen=True)
@@ -114,6 +154,21 @@ MODEL_CATALOG: Dict[str, Dict[str, str]] = {
         "family": "boosting",
         "paper_link": "Ensemble no lineal moderno para features tabulares",
         "description": "Boosting de histogramas; buen baseline no lineal sin dependencias deep learning.",
+    },
+    "cnn1d_iq": {
+        "family": "deep_learning_iq",
+        "paper_link": "CNN 1D end-to-end sobre ventanas I/Q crudas",
+        "description": "Red convolucional 1D que aprende patrones locales directamente desde I/Q normalizado.",
+    },
+    "lstm_iq": {
+        "family": "deep_learning_iq",
+        "paper_link": "LSTM/GRU para RF fingerprinting secuencial",
+        "description": "Modelo recurrente que aprende dinamica temporal de la ventana I/Q.",
+    },
+    "transformer_iq": {
+        "family": "deep_learning_iq",
+        "paper_link": "Transformer Encoder ligero para secuencias I/Q",
+        "description": "Modelo de atencion para relaciones largas dentro de ventanas I/Q crudas.",
     },
 }
 
@@ -456,6 +511,22 @@ def extract_features(iq: np.ndarray, n_fft_bins: int = 12) -> np.ndarray:
     return np.concatenate([np.asarray(values, dtype=np.float32), band_energy])
 
 
+def iq_to_tensor_window(iq: np.ndarray, target_samples: int = DEEP_INPUT_SAMPLES) -> np.ndarray:
+    iq = iq[np.isfinite(iq.real) & np.isfinite(iq.imag)]
+    if iq.size < 16:
+        raise ValueError("Ventana IQ demasiado corta")
+    iq = iq.astype(np.complex64, copy=False)
+    iq = iq - np.mean(iq)
+    rms = float(np.sqrt(np.mean(np.abs(iq.astype(np.complex128)) ** 2)))
+    if not np.isfinite(rms) or rms <= 0:
+        raise ValueError("Ventana IQ con potencia invalida")
+    iq = iq / rms
+    if iq.size != target_samples:
+        idx = np.linspace(0, iq.size - 1, target_samples).astype(np.int64)
+        iq = iq[idx]
+    return np.stack([iq.real.astype(np.float32), iq.imag.astype(np.float32)], axis=0)
+
+
 def windows_for_record(sample_count: Optional[int], window_size: int, windows_per_file: int) -> List[int]:
     if not sample_count or sample_count <= window_size:
         return [0]
@@ -538,6 +609,51 @@ def build_matrix(
     return np.vstack(rows), np.asarray(labels), np.asarray(groups), used
 
 
+def build_iq_tensor_matrix(
+    config: DatasetConfig,
+    limit_files: Optional[int],
+    max_files_per_class: Optional[int],
+    max_data_bytes: Optional[int],
+    window_size: int,
+    windows_per_file: int,
+    window_strategy: str = "linspace",
+    ieee_target: str = "auto",
+    input_samples: int = DEEP_INPUT_SAMPLES,
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray, List[dict]]:
+    rows: List[np.ndarray] = []
+    labels: List[str] = []
+    groups: List[str] = []
+    used: List[dict] = []
+    for record in iter_records(
+        config,
+        limit_files=limit_files,
+        max_files_per_class=max_files_per_class,
+        max_data_bytes=max_data_bytes,
+        ieee_target=ieee_target,
+    ):
+        starts = select_windows_for_record(record, window_size, windows_per_file, window_strategy)
+        ok_windows = 0
+        for start in starts:
+            try:
+                iq = read_iq_window(
+                    record["data_path"],
+                    record["dtype"],
+                    int(record.get("start_sample") or 0) + start,
+                    window_size,
+                )
+                rows.append(iq_to_tensor_window(iq, input_samples))
+                labels.append(record["label"])
+                groups.append(record["group"])
+                ok_windows += 1
+            except Exception as exc:
+                record["last_error"] = str(exc)
+        if ok_windows:
+            used.append({**record, "windows": ok_windows})
+    if not rows:
+        raise RuntimeError(f"No se pudieron extraer ventanas I/Q para {config.name}")
+    return np.stack(rows).astype(np.float32), np.asarray(labels), np.asarray(groups), used
+
+
 def make_estimator(kind: str, random_state: int) -> Pipeline:
     if kind not in MODEL_CATALOG:
         raise ValueError(f"Modelo no soportado: {kind}. Opciones: {', '.join(MODEL_CATALOG)}")
@@ -596,6 +712,71 @@ def make_estimator(kind: str, random_state: int) -> Pipeline:
         random_state=random_state,
     )
     return Pipeline([("scaler", StandardScaler()), ("classifier", clf)])
+
+
+class CNN1DIQ(nn.Module):
+    def __init__(self, n_classes: int):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Conv1d(2, 24, kernel_size=9, stride=2, padding=4),
+            nn.BatchNorm1d(24),
+            nn.ReLU(),
+            nn.MaxPool1d(2),
+            nn.Conv1d(24, 48, kernel_size=7, stride=2, padding=3),
+            nn.BatchNorm1d(48),
+            nn.ReLU(),
+            nn.AdaptiveAvgPool1d(1),
+        )
+        self.head = nn.Linear(48, n_classes)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.head(self.net(x).squeeze(-1))
+
+
+class LSTMIQ(nn.Module):
+    def __init__(self, n_classes: int):
+        super().__init__()
+        self.proj = nn.Linear(2, 32)
+        self.rnn = nn.GRU(32, 48, num_layers=1, batch_first=True, bidirectional=True)
+        self.head = nn.Linear(96, n_classes)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        seq = x.transpose(1, 2)
+        seq = torch.relu(self.proj(seq))
+        _, h = self.rnn(seq)
+        h = torch.cat([h[-2], h[-1]], dim=1)
+        return self.head(h)
+
+
+class TransformerIQ(nn.Module):
+    def __init__(self, n_classes: int):
+        super().__init__()
+        self.patch = nn.Conv1d(2, 48, kernel_size=16, stride=16)
+        layer = nn.TransformerEncoderLayer(
+            d_model=48,
+            nhead=4,
+            dim_feedforward=96,
+            dropout=0.1,
+            batch_first=True,
+            activation="gelu",
+        )
+        self.encoder = nn.TransformerEncoder(layer, num_layers=2)
+        self.head = nn.Linear(48, n_classes)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        seq = self.patch(x).transpose(1, 2)
+        out = self.encoder(seq)
+        return self.head(out.mean(dim=1))
+
+
+def make_deep_model(kind: str, n_classes: int) -> nn.Module:
+    if kind == "cnn1d_iq":
+        return CNN1DIQ(n_classes)
+    if kind == "lstm_iq":
+        return LSTMIQ(n_classes)
+    if kind == "transformer_iq":
+        return TransformerIQ(n_classes)
+    raise ValueError(f"Modelo deep no soportado: {kind}")
 
 
 def stratified_group_split(
@@ -677,8 +858,295 @@ def write_inventory(config: DatasetConfig, args: argparse.Namespace) -> Path:
     return out
 
 
+def split_indices_for_config(
+    config: DatasetConfig,
+    labels: np.ndarray,
+    groups: np.ndarray,
+    test_size: float,
+    random_state: int,
+) -> Tuple[np.ndarray, np.ndarray, str]:
+    if config.name == "wifi_dat_day":
+        all_idx = np.arange(len(labels))
+        train_idx, test_idx = train_test_split(
+            all_idx,
+            test_size=test_size,
+            random_state=random_state,
+            stratify=labels,
+        )
+        return (
+            train_idx,
+            test_idx,
+            "Split estratificado por ventanas dentro de cada archivo .dat. Validacion debil: las ventanas de la misma captura pueden aparecer en train y test porque solo hay un archivo por clase.",
+        )
+    train_idx, test_idx = stratified_group_split(labels, groups, test_size, random_state)
+    return (
+        train_idx,
+        test_idx,
+        "Split estratificado por clase y separado por archivo/captura; ninguna captura usada como grupo aparece a la vez en train y test.",
+    )
+
+
+def report_common_records(used: Sequence[dict]) -> List[dict]:
+    return [
+        {
+            "meta_path": str(r["meta_path"].relative_to(ROOT)),
+            "data_path": str(r["data_path"].relative_to(ROOT)),
+            "label": r["label"],
+            "dtype": r["dtype"],
+            "sample_count": r["sample_count"],
+            "data_size_bytes": r.get("data_size_bytes"),
+            "start_sample": r.get("start_sample"),
+            "end_sample": r.get("end_sample"),
+            "windows": r.get("windows"),
+            "group": r.get("group"),
+        }
+        for r in used
+    ]
+
+
+def append_model_history(report: dict) -> None:
+    REPORTS_DIR.mkdir(exist_ok=True)
+    entry = {
+        "run_id": datetime.utcnow().strftime("%Y%m%dT%H%M%SZ"),
+        "recorded_at": datetime.utcnow().isoformat() + "Z",
+        "dataset": report.get("dataset"),
+        "model_kind": report.get("model_kind"),
+        "model_family": report.get("model_family"),
+        "training_action": report.get("training_action"),
+        "model_version": report.get("model_version"),
+        "versioned_model_path": report.get("versioned_model_path"),
+        "base_model_path": report.get("base_model_path"),
+        "base_report_path": report.get("base_report_path"),
+        "seed": report.get("random_state"),
+        "trained_at": report.get("trained_at"),
+        "model_path": report.get("model_path"),
+        "model_format": report.get("model_format") or ("pt" if str(report.get("model_path", "")).endswith(".pt") else "joblib"),
+        "model_size_bytes": report.get("model_size_bytes"),
+        "holdout_accuracy": report.get("holdout_accuracy"),
+        "balanced_accuracy": report.get("balanced_accuracy"),
+        "macro_f1": report.get("macro_f1"),
+        "base_metrics": report.get("base_metrics"),
+        "records_used": report.get("records_used"),
+        "windows": report.get("windows"),
+        "train_windows": report.get("train_windows"),
+        "test_windows": report.get("test_windows"),
+        "estimated_iq_gb_read": report.get("estimated_iq_gb_read"),
+        "referenced_data_size_bytes": report.get("referenced_data_size_bytes"),
+        "requested_max_data_gb": report.get("requested_max_data_gb"),
+        "requested_max_data_percent": report.get("requested_max_data_percent"),
+        "window_strategy": report.get("window_strategy"),
+        "split_protocol": report.get("split_protocol"),
+        "training_history": report.get("training_history") or [],
+    }
+    paths = [
+        REPORTS_DIR / f"{entry['dataset']}_{entry['model_kind']}_history.json",
+        REPORTS_DIR / "model_training_history.json",
+    ]
+    for path in paths:
+        if path.exists():
+            payload = json.loads(path.read_text(encoding="utf-8"))
+            runs = payload.get("runs", []) if isinstance(payload, dict) else []
+        else:
+            runs = []
+        runs.append(entry)
+        path.write_text(
+            json.dumps({"dataset": entry["dataset"], "model_kind": entry["model_kind"], "runs": runs[-200:]}, indent=2),
+            encoding="utf-8",
+        )
+
+
+def train_deep_dataset(config: DatasetConfig, args: argparse.Namespace) -> Path:
+    model_kind = getattr(args, "model_kind", None) or "cnn1d_iq"
+    training_action = normalized_training_action(args)
+    update_latest_model = bool(getattr(args, "update_latest_model", True))
+    model_version = make_model_version(training_action, int(args.random_state))
+    base_model_path = getattr(args, "base_model_path", None)
+    base_report_path = getattr(args, "base_report_path", None)
+    base_report = load_optional_report(base_report_path)
+    torch.manual_seed(int(args.random_state))
+    np.random.seed(int(args.random_state))
+    x, labels, groups, used = build_iq_tensor_matrix(
+        config,
+        limit_files=args.limit_files,
+        max_files_per_class=args.max_files_per_class,
+        max_data_bytes=getattr(args, "max_data_bytes", None),
+        window_size=args.window_size,
+        windows_per_file=args.windows_per_file,
+        window_strategy=getattr(args, "window_strategy", "linspace"),
+        ieee_target=args.ieee_target,
+        input_samples=DEEP_INPUT_SAMPLES,
+    )
+    class_names = sorted(set(labels.tolist()))
+    if len(class_names) < 2:
+        raise RuntimeError(f"{config.name} solo tiene una clase ({class_names}). No se puede entrenar un modelo supervisado.")
+
+    encoder = LabelEncoder()
+    y = encoder.fit_transform(labels)
+    train_idx, test_idx, split_protocol = split_indices_for_config(config, labels, groups, args.test_size, args.random_state)
+    train_groups = set(groups[train_idx].tolist())
+    test_groups = set(groups[test_idx].tolist())
+    holdout_used = [r for r in used if r["group"] in test_groups]
+    train_used = [r for r in used if r["group"] in train_groups]
+
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    model = make_deep_model(model_kind, len(encoder.classes_)).to(device)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=1e-3, weight_decay=1e-4)
+    loss_fn = nn.CrossEntropyLoss()
+    train_ds = TensorDataset(torch.from_numpy(x[train_idx]), torch.from_numpy(y[train_idx]).long())
+    train_loader = DataLoader(train_ds, batch_size=min(DEEP_BATCH_SIZE, max(1, len(train_ds))), shuffle=True)
+    history = []
+    model.train()
+    for epoch in range(DEEP_EPOCHS):
+        total_loss = 0.0
+        total_items = 0
+        for xb, yb in train_loader:
+            xb = xb.to(device)
+            yb = yb.to(device)
+            optimizer.zero_grad(set_to_none=True)
+            loss = loss_fn(model(xb), yb)
+            loss.backward()
+            optimizer.step()
+            total_loss += float(loss.item()) * int(xb.shape[0])
+            total_items += int(xb.shape[0])
+        history.append({"epoch": epoch + 1, "loss": total_loss / max(1, total_items)})
+
+    model.eval()
+    with torch.no_grad():
+        logits = model(torch.from_numpy(x[test_idx]).to(device))
+        pred = torch.argmax(logits, dim=1).cpu().numpy()
+    acc = accuracy_score(y[test_idx], pred)
+    balanced_acc = balanced_accuracy_score(y[test_idx], pred)
+    macro_f1 = f1_score(y[test_idx], pred, average="macro", zero_division=0)
+    referenced_bytes = sum(int(r.get("data_size_bytes") or 0) for r in used)
+    selection_reads_per_record = 48 if getattr(args, "window_strategy", "linspace") == "energy" else 0
+    estimated_iq_bytes_read = sum(
+        (
+            (int(r.get("windows") or 0) + selection_reads_per_record)
+            * int(args.window_size)
+            * complex_sample_nbytes(str(r.get("dtype") or config.default_dtype))
+        )
+        for r in used
+    )
+
+    MODELS_DIR.mkdir(exist_ok=True)
+    MODEL_VERSIONS_DIR.mkdir(parents=True, exist_ok=True)
+    REPORTS_DIR.mkdir(exist_ok=True)
+    model_path = MODELS_DIR / f"{config.name}_{model_kind}_model.pt"
+    version_path = versioned_model_path(config.name, model_kind, model_version)
+    version_report_path = versioned_report_path(config.name, model_kind, model_version)
+    version_path.parent.mkdir(parents=True, exist_ok=True)
+    version_report_path.parent.mkdir(parents=True, exist_ok=True)
+    trained_at = datetime.utcnow().isoformat() + "Z"
+    bundle = {
+        "format": "torch_iq_classifier",
+        "dataset": config.name,
+        "model_kind": model_kind,
+        "model_metadata": MODEL_CATALOG[model_kind],
+        "training_action": training_action,
+        "model_version": model_version,
+        "base_model_path": base_model_path,
+        "base_report_path": base_report_path,
+        "random_state": int(args.random_state),
+        "state_dict": model.cpu().state_dict(),
+        "label_classes": encoder.classes_.tolist(),
+        "window_size": args.window_size,
+        "input_samples": DEEP_INPUT_SAMPLES,
+        "windows_per_file": args.windows_per_file,
+        "window_strategy": getattr(args, "window_strategy", "linspace"),
+        "ieee_target": args.ieee_target,
+        "dtype_default": config.default_dtype,
+        "trained_at": trained_at,
+        "classes": encoder.classes_.tolist(),
+        "source_records": report_common_records(used),
+        "train_record_groups": sorted(train_groups),
+        "holdout_record_groups": sorted(test_groups),
+    }
+    torch.save(bundle, version_path)
+    if update_latest_model:
+        torch.save(bundle, model_path)
+        model_size_bytes = model_path.stat().st_size
+    else:
+        model_size_bytes = version_path.stat().st_size
+    report = {
+        "dataset": config.name,
+        "model_kind": model_kind,
+        "model_metadata": MODEL_CATALOG[model_kind],
+        "model_family": MODEL_CATALOG[model_kind]["family"],
+        "training_action": training_action,
+        "model_version": model_version,
+        "versioned_model_path": str(version_path.relative_to(ROOT)),
+        "versioned_report_path": str(version_report_path.relative_to(ROOT)),
+        "base_model_path": base_model_path,
+        "base_report_path": base_report_path,
+        "base_metrics": {
+            "holdout_accuracy": base_report.get("holdout_accuracy"),
+            "balanced_accuracy": base_report.get("balanced_accuracy"),
+            "macro_f1": base_report.get("macro_f1"),
+            "model_version": base_report.get("model_version"),
+            "trained_at": base_report.get("trained_at"),
+        } if base_report else None,
+        "random_state": int(args.random_state),
+        "trained_at": trained_at,
+        "model_path": str(model_path.relative_to(ROOT)),
+        "active_model_path": str((model_path if update_latest_model else version_path).relative_to(ROOT)),
+        "model_size_bytes": model_size_bytes,
+        "model_format": "pt",
+        "records_used": len(used),
+        "referenced_data_size_bytes": referenced_bytes,
+        "data_size_bytes": referenced_bytes,
+        "estimated_iq_bytes_read": estimated_iq_bytes_read,
+        "estimated_iq_gb_read": estimated_iq_bytes_read / (1024 ** 3),
+        "requested_max_data_gb": getattr(args, "max_data_gb", None),
+        "requested_max_data_percent": getattr(args, "max_data_percent", None),
+        "requested_max_data_bytes": getattr(args, "max_data_bytes", None),
+        "window_strategy": getattr(args, "window_strategy", "linspace"),
+        "windows": int(x.shape[0]),
+        "input_shape": [2, DEEP_INPUT_SAMPLES],
+        "features": int(x.shape[1] * x.shape[2]),
+        "classes": encoder.classes_.tolist(),
+        "train_windows": int(len(train_idx)),
+        "test_windows": int(len(test_idx)),
+        "train_records": len(train_used),
+        "holdout_records_count": len(holdout_used),
+        "split_protocol": split_protocol,
+        "holdout_records": report_common_records(holdout_used[:100]),
+        "holdout_accuracy": float(acc),
+        "balanced_accuracy": float(balanced_acc),
+        "macro_f1": float(macro_f1),
+        "training_history": history,
+        "classification_report": classification_report(
+            y[test_idx],
+            pred,
+            target_names=encoder.classes_,
+            labels=list(range(len(encoder.classes_))),
+            zero_division=0,
+            output_dict=True,
+        ),
+        "confusion_matrix": confusion_matrix(y[test_idx], pred).tolist(),
+        "sample_predictions": prediction_samples(bundle, holdout_used[: min(5, len(holdout_used))]),
+    }
+    report_path = REPORTS_DIR / f"{config.name}_{model_kind}_validation.json"
+    version_report_path.write_text(json.dumps(report, indent=2), encoding="utf-8")
+    if update_latest_model:
+        report_path.write_text(json.dumps(report, indent=2), encoding="utf-8")
+        append_model_history(report)
+        latest_path = REPORTS_DIR / f"{config.name}_validation.json"
+        latest_path.write_text(json.dumps(report, indent=2), encoding="utf-8")
+        torch.save(bundle, MODELS_DIR / f"{config.name}_device_model.pt")
+    print(json.dumps({"model": str(model_path), "report": str(report_path), "accuracy": acc}, indent=2))
+    return model_path if update_latest_model else version_path
+
+
 def train_dataset(config: DatasetConfig, args: argparse.Namespace) -> Path:
     model_kind = getattr(args, "model_kind", None) or config.model_kind
+    if model_kind in DEEP_MODEL_KINDS:
+        return train_deep_dataset(config, args)
+    training_action = normalized_training_action(args)
+    update_latest_model = bool(getattr(args, "update_latest_model", True))
+    model_version = make_model_version(training_action, int(args.random_state))
+    base_model_path = getattr(args, "base_model_path", None)
+    base_report_path = getattr(args, "base_report_path", None)
+    base_report = load_optional_report(base_report_path)
     x, labels, groups, used = build_matrix(
         config,
         limit_files=args.limit_files,
@@ -698,21 +1166,7 @@ def train_dataset(config: DatasetConfig, args: argparse.Namespace) -> Path:
 
     encoder = LabelEncoder()
     y = encoder.fit_transform(labels)
-    if config.name == "wifi_dat_day":
-        all_idx = np.arange(len(labels))
-        train_idx, test_idx = train_test_split(
-            all_idx,
-            test_size=args.test_size,
-            random_state=args.random_state,
-            stratify=labels,
-        )
-        split_protocol = (
-            "Split estratificado por ventanas dentro de cada archivo .dat. "
-            "Validacion debil: las ventanas de la misma captura pueden aparecer en train y test porque solo hay un archivo por clase."
-        )
-    else:
-        train_idx, test_idx = stratified_group_split(labels, groups, args.test_size, args.random_state)
-        split_protocol = "Split estratificado por clase y separado por archivo/captura; ninguna captura usada como grupo aparece a la vez en train y test."
+    train_idx, test_idx, split_protocol = split_indices_for_config(config, labels, groups, args.test_size, args.random_state)
     train_groups = set(groups[train_idx].tolist())
     test_groups = set(groups[test_idx].tolist())
     holdout_used = [r for r in used if r["group"] in test_groups]
@@ -732,11 +1186,18 @@ def train_dataset(config: DatasetConfig, args: argparse.Namespace) -> Path:
     )
 
     MODELS_DIR.mkdir(exist_ok=True)
+    MODEL_VERSIONS_DIR.mkdir(parents=True, exist_ok=True)
     REPORTS_DIR.mkdir(exist_ok=True)
+    trained_at = datetime.utcnow().isoformat() + "Z"
     bundle = {
         "dataset": config.name,
         "model_kind": model_kind,
         "model_metadata": MODEL_CATALOG[model_kind],
+        "training_action": training_action,
+        "model_version": model_version,
+        "base_model_path": base_model_path,
+        "base_report_path": base_report_path,
+        "random_state": int(args.random_state),
         "model": model,
         "label_encoder": encoder,
         "feature_names": feature_names(),
@@ -745,7 +1206,7 @@ def train_dataset(config: DatasetConfig, args: argparse.Namespace) -> Path:
         "window_strategy": getattr(args, "window_strategy", "linspace"),
         "ieee_target": args.ieee_target,
         "dtype_default": config.default_dtype,
-        "trained_at": datetime.utcnow().isoformat() + "Z",
+        "trained_at": trained_at,
         "classes": encoder.classes_.tolist(),
         "source_records": [
             {
@@ -765,14 +1226,39 @@ def train_dataset(config: DatasetConfig, args: argparse.Namespace) -> Path:
         "holdout_record_groups": sorted(test_groups),
     }
     model_path = MODELS_DIR / f"{config.name}_{model_kind}_model.joblib"
-    joblib.dump(bundle, model_path)
-    model_size_bytes = model_path.stat().st_size
+    version_path = versioned_model_path(config.name, model_kind, model_version)
+    version_report_path = versioned_report_path(config.name, model_kind, model_version)
+    version_path.parent.mkdir(parents=True, exist_ok=True)
+    version_report_path.parent.mkdir(parents=True, exist_ok=True)
+    joblib.dump(bundle, version_path)
+    if update_latest_model:
+        joblib.dump(bundle, model_path)
+        model_size_bytes = model_path.stat().st_size
+    else:
+        model_size_bytes = version_path.stat().st_size
 
     report = {
         "dataset": config.name,
         "model_kind": model_kind,
         "model_metadata": MODEL_CATALOG[model_kind],
+        "model_family": MODEL_CATALOG[model_kind]["family"],
+        "training_action": training_action,
+        "model_version": model_version,
+        "versioned_model_path": str(version_path.relative_to(ROOT)),
+        "versioned_report_path": str(version_report_path.relative_to(ROOT)),
+        "base_model_path": base_model_path,
+        "base_report_path": base_report_path,
+        "base_metrics": {
+            "holdout_accuracy": base_report.get("holdout_accuracy"),
+            "balanced_accuracy": base_report.get("balanced_accuracy"),
+            "macro_f1": base_report.get("macro_f1"),
+            "model_version": base_report.get("model_version"),
+            "trained_at": base_report.get("trained_at"),
+        } if base_report else None,
+        "random_state": int(args.random_state),
+        "trained_at": trained_at,
         "model_path": str(model_path.relative_to(ROOT)),
+        "active_model_path": str((model_path if update_latest_model else version_path).relative_to(ROOT)),
         "model_size_bytes": model_size_bytes,
         "records_used": len(used),
         "referenced_data_size_bytes": referenced_bytes,
@@ -821,13 +1307,16 @@ def train_dataset(config: DatasetConfig, args: argparse.Namespace) -> Path:
         "sample_predictions": prediction_samples(bundle, holdout_used[: min(5, len(holdout_used))]),
     }
     report_path = REPORTS_DIR / f"{config.name}_{model_kind}_validation.json"
-    report_path.write_text(json.dumps(report, indent=2), encoding="utf-8")
-    latest_path = REPORTS_DIR / f"{config.name}_validation.json"
-    latest_path.write_text(json.dumps(report, indent=2), encoding="utf-8")
-    latest_model = MODELS_DIR / f"{config.name}_device_model.joblib"
-    joblib.dump(bundle, latest_model)
+    version_report_path.write_text(json.dumps(report, indent=2), encoding="utf-8")
+    if update_latest_model:
+        report_path.write_text(json.dumps(report, indent=2), encoding="utf-8")
+        append_model_history(report)
+        latest_path = REPORTS_DIR / f"{config.name}_validation.json"
+        latest_path.write_text(json.dumps(report, indent=2), encoding="utf-8")
+        latest_model = MODELS_DIR / f"{config.name}_device_model.joblib"
+        joblib.dump(bundle, latest_model)
     print(json.dumps({"model": str(model_path), "report": str(report_path), "accuracy": acc}, indent=2))
-    return model_path
+    return model_path if update_latest_model else version_path
 
 
 def prediction_samples(bundle: dict, records: Sequence[dict]) -> List[dict]:
@@ -868,6 +1357,26 @@ def predict_record(
         3,
         str(bundle.get("window_strategy") or "linspace"),
     )
+    if bundle.get("format") == "torch_iq_classifier":
+        input_samples = int(bundle.get("input_samples") or DEEP_INPUT_SAMPLES)
+        windows = []
+        for start in starts:
+            iq = read_iq_window(data_path, dtype_name, int(start_sample or 0) + start, int(bundle["window_size"]))
+            windows.append(iq_to_tensor_window(iq, input_samples))
+        x_tensor = torch.from_numpy(np.stack(windows).astype(np.float32))
+        model = make_deep_model(str(bundle["model_kind"]), len(bundle["label_classes"]))
+        model.load_state_dict(bundle["state_dict"])
+        model.eval()
+        with torch.no_grad():
+            logits = model(x_tensor)
+            proba = torch.softmax(logits, dim=1).mean(dim=0).cpu().numpy()
+        order = np.argsort(proba)[::-1]
+        top = [
+            {"label": str(bundle["label_classes"][int(i)]), "probability": float(proba[int(i)])}
+            for i in order[:top_k]
+        ]
+        return {"prediction": top[0]["label"], "confidence": top[0]["probability"], "top_k": top}
+
     feats = []
     for start in starts:
         iq = read_iq_window(data_path, dtype_name, int(start_sample or 0) + start, int(bundle["window_size"]))
@@ -894,15 +1403,27 @@ def predict_record(
     }
 
 
+def load_model_bundle(path: Path) -> dict:
+    if path.suffix.lower() == ".pt":
+        return torch.load(path, map_location="cpu")
+    return joblib.load(path)
+
+
 def predict_cli(args: argparse.Namespace) -> None:
-    bundle = joblib.load(args.model)
+    bundle = load_model_bundle(Path(args.model))
     dataset = bundle["dataset"]
     config = DATASETS[dataset]
     meta_path = Path(args.meta)
-    meta = load_json(meta_path)
-    data_path = Path(args.data) if args.data else data_path_for_meta(config, meta_path)
-    dtype_name = args.dtype or dtype_from_meta(config, meta)
-    sample_count = sample_count_from_meta(meta)
+    if config.name == "wifi_dat_day":
+        meta = {}
+        data_path = Path(args.data) if args.data else meta_path
+        dtype_name = args.dtype or config.default_dtype
+        sample_count = data_path.stat().st_size // complex_sample_nbytes(dtype_name)
+    else:
+        meta = load_json(meta_path)
+        data_path = Path(args.data) if args.data else data_path_for_meta(config, meta_path)
+        dtype_name = args.dtype or dtype_from_meta(config, meta)
+        sample_count = sample_count_from_meta(meta)
     expected = None
     try:
         expected = label_for_meta(config, meta_path, meta, ieee_target=bundle.get("ieee_target", "auto"))

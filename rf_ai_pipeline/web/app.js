@@ -31,7 +31,14 @@ function params() {
     limit_files: numberOrNull("limitFiles"),
     prediction_limit: numberOrNull("predictionLimit") || 5,
     ieee_target: $("ieeeTarget").value,
+    compare_mode: $("compareMode")?.value || "evaluate_existing",
+    stability_compare: ($("compareMode")?.value || "evaluate_existing") !== "evaluate_existing",
   };
+}
+
+function selectedCompareModels() {
+  const checked = [...document.querySelectorAll(".compareModelCheck:checked")].map((el) => el.value);
+  return checked.length ? checked : [$("modelKind").value].filter(Boolean);
 }
 
 async function api(path, options = {}) {
@@ -97,6 +104,7 @@ function renderDatasetMeta() {
   [...$("modelKind").options].forEach((opt) => {
     opt.textContent = existing.includes(opt.value) ? `${opt.value} (trained)` : opt.value;
   });
+  updateCompareModelLabels(existing);
   $("ieeeTarget").disabled = dataset.name !== "ieee_cbrs";
   if (dataset.name === "uav_lightbridge" && !$("maxFilesPerClass").value && !$("maxDataGb").value) {
     $("maxFilesPerClass").placeholder = "recomendado: 100-300";
@@ -136,6 +144,28 @@ function renderDataBudgetPreview() {
     return;
   }
   el.textContent = `Sin presupuesto: se pueden usar todos los archivos elegibles (${fmtBytes(totalBytes)}). Puedes poner GB exactos o porcentaje.`;
+}
+
+function updateCompareModelLabels(existing = []) {
+  document.querySelectorAll(".compareModelItem").forEach((item) => {
+    const value = item.dataset.model;
+    const label = item.querySelector(".modelCheckName");
+    if (label) label.textContent = existing.includes(value) ? `${value} (trained)` : value;
+  });
+}
+
+function renderCompareModelSelector() {
+  const target = $("compareModelList");
+  if (!target) return;
+  target.innerHTML = Object.entries(state.modelCatalog)
+    .map(([key, meta]) => `
+      <label class="compareModelItem" data-model="${escapeHtml(key)}">
+        <input class="compareModelCheck" type="checkbox" value="${escapeHtml(key)}" checked />
+        <span class="modelCheckName">${escapeHtml(key)}</span>
+        <small>${escapeHtml(meta.family)}</small>
+      </label>
+    `)
+    .join("");
 }
 
 function applyDatasetPreset() {
@@ -184,6 +214,7 @@ async function loadDatasets(options = {}) {
     $("modelKind").innerHTML = Object.entries(state.modelCatalog)
       .map(([key, meta]) => `<option value="${escapeHtml(key)}">${escapeHtml(key)} · ${escapeHtml(meta.family)}</option>`)
       .join("");
+    renderCompareModelSelector();
     renderModelCatalog();
   }
   const data = await api("/api/datasets");
@@ -278,6 +309,7 @@ function renderInventory() {
 function renderMetrics() {
   const validation = state.reports?.validation?.report;
   const trainedModels = state.reports?.models?.models || [];
+  const history = state.reports?.history?.report;
   if (!validation) {
     const modelsTable = renderTrainedModelsTable(trainedModels);
     $("metricsView").innerHTML = `<section class="panel"><h2>Validacion</h2><p>No hay reporte de validacion generado para el modelo seleccionado.</p></section>${modelsTable}`;
@@ -328,7 +360,135 @@ function renderMetrics() {
       <h2>Predicciones de control</h2>
       <table><thead><tr><th>Esperado</th><th>Predicho</th><th>Confianza</th><th>Archivo</th></tr></thead><tbody>${samples}</tbody></table>
     </section>
+    ${renderModelHistory(history, validation)}
     ${renderTrainedModelsTable(trainedModels)}
+  `;
+}
+
+function polylineChart(points, key, label, color = "#2563eb", options = {}) {
+  const rows = (points || [])
+    .map((p, idx) => ({
+      x: Number(options.xKey ? p[options.xKey] : idx + 1),
+      y: Number(p[key]),
+    }))
+    .filter((p) => Number.isFinite(p.x) && Number.isFinite(p.y));
+  const values = rows.map((p) => p.y);
+  if (values.length < 2) {
+    return `
+      <div class="miniChart">
+        <strong>${escapeHtml(label)}</strong>
+        <p>No hay suficientes puntos para curva.</p>
+        <span>Eje X: ${escapeHtml(options.xLabel || "ejecucion cronologica")}</span>
+        <span>Eje Y: ${escapeHtml(options.yLabel || key)}</span>
+      </div>`;
+  }
+  const width = 560;
+  const height = 190;
+  const padLeft = 62;
+  const padRight = 18;
+  const padTop = 22;
+  const padBottom = 48;
+  const rawMin = Math.min(...values);
+  const rawMax = Math.max(...values);
+  const min = options.fixed01 ? 0 : Math.min(0, rawMin);
+  const max = options.fixed01 ? 1 : Math.max(rawMax, rawMin + 1e-9);
+  const xMin = Math.min(...rows.map((p) => p.x));
+  const xMax = Math.max(...rows.map((p) => p.x));
+  const plotW = width - padLeft - padRight;
+  const plotH = height - padTop - padBottom;
+  const coords = rows.map((p) => {
+    const x = padLeft + ((p.x - xMin) / Math.max(1e-9, xMax - xMin)) * plotW;
+    const y = padTop + (1 - ((p.y - min) / Math.max(1e-9, max - min))) * plotH;
+    return `${x.toFixed(1)},${y.toFixed(1)}`;
+  }).join(" ");
+  const xLabel = options.xLabel || "ejecucion cronologica (#)";
+  const yLabel = options.yLabel || key;
+  const unit = options.unit || "";
+  return `
+    <div class="miniChart">
+      <strong>${escapeHtml(label)}</strong>
+      <div class="miniChartMeta">
+        <span>X: ${escapeHtml(xLabel)}</span>
+        <span>Y: ${escapeHtml(yLabel)}${unit ? ` (${escapeHtml(unit)})` : ""}</span>
+      </div>
+      <svg viewBox="0 0 ${width} ${height}" role="img">
+        <line x1="${padLeft}" y1="${height - padBottom}" x2="${width - padRight}" y2="${height - padBottom}" />
+        <line x1="${padLeft}" y1="${padTop}" x2="${padLeft}" y2="${height - padBottom}" />
+        <text x="${padLeft}" y="${height - 16}" text-anchor="middle">${escapeHtml(String(xMin))}</text>
+        <text x="${width - padRight}" y="${height - 16}" text-anchor="end">${escapeHtml(String(xMax))}</text>
+        <text x="${width / 2}" y="${height - 2}" text-anchor="middle">${escapeHtml(xLabel)}</text>
+        <text x="6" y="${padTop + 4}" text-anchor="start">${fmt(max)}</text>
+        <text x="6" y="${height - padBottom + 4}" text-anchor="start">${fmt(min)}</text>
+        <text x="12" y="${height / 2}" transform="rotate(-90 12 ${height / 2})" text-anchor="middle">${escapeHtml(yLabel)}</text>
+        <polyline points="${coords}" fill="none" stroke="${color}" stroke-width="3" />
+        ${coords.split(" ").map((c) => {
+          const [x, y] = c.split(",");
+          return `<circle cx="${x}" cy="${y}" r="3.5" fill="${color}" />`;
+        }).join("")}
+      </svg>
+      <span>n=${values.length} | ultimo=${fmt(values[values.length - 1])}${unit ? ` ${escapeHtml(unit)}` : ""} | mejor=${fmt(Math.max(...values))}${unit ? ` ${escapeHtml(unit)}` : ""} | rango=[${fmt(min)}, ${fmt(max)}]</span>
+    </div>
+  `;
+}
+
+function renderLossCurve(trainingHistory) {
+  const rows = trainingHistory || [];
+  if (!rows.length) return "";
+  return polylineChart(rows, "loss", "Curva de perdida por epoca (deep learning)", "#dc2626", {
+    xKey: "epoch",
+    xLabel: "epoca de entrenamiento",
+    yLabel: "loss de entrenamiento",
+    unit: "cross-entropy",
+  });
+}
+
+function renderModelHistory(history, validation) {
+  const runs = history?.runs || [];
+  const recent = runs.slice(-12);
+  const lastDeepHistory = validation.training_history || runs[runs.length - 1]?.training_history || [];
+  const runRows = recent.slice().reverse().map((run, idx) => `
+    <tr>
+      <td>${recent.length - idx}</td>
+      <td>${escapeHtml(run.recorded_at || "")}</td>
+      <td>${fmt(run.holdout_accuracy)}</td>
+      <td>${fmt(run.balanced_accuracy)}</td>
+      <td>${fmt(run.macro_f1)}</td>
+      <td>${fmt(run.windows)}</td>
+      <td>${fmt(run.estimated_iq_gb_read)} GB</td>
+      <td>${fmtModelSize(run.model_size_bytes)}</td>
+    </tr>
+  `).join("");
+  return `
+    <section class="panel">
+      <h2>Historial de aprendizaje del modelo</h2>
+      <p>Curvas generadas desde entrenamientos/reentrenamientos guardados para este dataset y tecnica. Permiten ver si el modelo mejora, se estanca o sobreajusta entre ejecuciones.</p>
+      <div class="chartGrid historyCharts">
+        ${polylineChart(recent, "macro_f1", "Macro-F1 por ejecucion", "#16a34a", {
+          xLabel: "ejecucion cronologica guardada (#)",
+          yLabel: "Macro-F1 holdout",
+          unit: "0-1",
+          fixed01: true,
+        })}
+        ${polylineChart(recent, "holdout_accuracy", "Accuracy holdout por ejecucion", "#2563eb", {
+          xLabel: "ejecucion cronologica guardada (#)",
+          yLabel: "accuracy holdout",
+          unit: "0-1",
+          fixed01: true,
+        })}
+        ${polylineChart(recent, "balanced_accuracy", "Balanced accuracy por ejecucion", "#7c3aed", {
+          xLabel: "ejecucion cronologica guardada (#)",
+          yLabel: "balanced accuracy holdout",
+          unit: "0-1",
+          fixed01: true,
+        })}
+        ${renderLossCurve(lastDeepHistory)}
+      </div>
+      <table>
+        <thead><tr><th>#</th><th>Fecha</th><th>Accuracy</th><th>Balanced</th><th>Macro-F1</th><th>Ventanas</th><th>GB leidos</th><th>Peso</th></tr></thead>
+        <tbody>${runRows || `<tr><td colspan="8">Aun no hay historial persistente. Entrena o reentrena este modelo para crear la primera entrada.</td></tr>`}</tbody>
+      </table>
+      <p>Historial: ${escapeHtml(state.reports?.history?.path || "n/a")}</p>
+    </section>
   `;
 }
 
@@ -367,7 +527,8 @@ function buildImprovementPlan(result, best) {
   const changes = {};
   const reasons = [];
   const current = params();
-  const macroF1 = Number(best.retrain?.macro_f1 || 0);
+  const metricSet = best.retrain || best.evaluation || {};
+  const macroF1 = Number(metricSet.macro_f1 || 0);
   const predAcc = Number(best.prediction_accuracy || 0);
   const stabilityGap = Number(best.stability_gap_macro_f1 || 0);
   const dataset = result.dataset;
@@ -456,7 +617,7 @@ function renderImprovementPlan(plan) {
 
 function renderRanking(result, options = {}) {
   if (!result || !result.results) {
-    $("rankingView").innerHTML = `<section class="panel"><h2>Comparacion cientifica</h2><p>Ejecuta "Comparar tecnicas IA" para lanzar train, retrain, prediccion de control, conteo de aciertos/fallos, tiempos y ranking.</p></section>`;
+    $("rankingView").innerHTML = `<section class="panel"><h2>Comparacion cientifica</h2><p>Ejecuta "Comparar tecnicas IA" para evaluar modelos ya entrenados. Cambia "Modo de comparacion" solo si quieres lanzar reentrenamiento o train from scratch experimental sin pisar el modelo actual.</p></section>`;
     return;
   }
   state.benchmark = result;
@@ -464,11 +625,17 @@ function renderRanking(result, options = {}) {
     .map((row) => {
       const train = row.train || {};
       const retrain = row.retrain || {};
+      const evaluation = row.evaluation || {};
+      const metricSet = row.retrain || row.evaluation || {};
       return `
         <tr>
-          <td>${row.rank}</td>
+          <td>${row.rank ?? "-"}</td>
           <td>${escapeHtml(row.model_kind)}</td>
-          <td>${escapeHtml(row.family)}</td>
+          <td>${escapeHtml(row.model_family || row.family)}</td>
+          <td>${escapeHtml(row.model_action || row.training_action || row.status || "n/a")}</td>
+          <td>${escapeHtml(metricSet.model_version || row.model_version || "n/a")}</td>
+          <td>${escapeHtml(metricSet.seed || row.seed || "n/a")}</td>
+          <td>${escapeHtml(metricSet.trained_at || row.trained_at || "n/a")}</td>
           <td>${fmt(row.score)}</td>
           <td>${fmt(row.requested_max_data_percent)}</td>
           <td>${fmtBytes(row.requested_max_data_bytes)}</td>
@@ -478,9 +645,9 @@ function renderRanking(result, options = {}) {
           <td>${row.prediction_hits}/${row.prediction_count}</td>
           <td>${row.prediction_failures}</td>
           <td>${fmt(row.prediction_accuracy)}</td>
-          <td>${fmt(train.macro_f1)}</td>
+          <td>${fmt(train.macro_f1 || evaluation.macro_f1)}</td>
           <td>${fmt(retrain.macro_f1)}</td>
-          <td>${fmt(retrain.balanced_accuracy)}</td>
+          <td>${fmt(metricSet.balanced_accuracy)}</td>
           <td>${fmt(row.stability_gap_macro_f1)}</td>
           <td>${fmt(train.time_seconds)} s</td>
           <td>${fmt(retrain.time_seconds)} s</td>
@@ -511,31 +678,58 @@ function renderRanking(result, options = {}) {
   const protocolRows = (result.protocol?.steps || [])
     .map((step, idx) => `<tr><td>${idx + 1}</td><td>${escapeHtml(step)}</td></tr>`)
     .join("");
+  const familyRows = (result.family_summary || [])
+    .map(
+      (row, idx) => `
+      <tr>
+        <td>${idx + 1}</td>
+        <td>${escapeHtml(row.model_family)}</td>
+        <td>${row.model_count}</td>
+        <td>${escapeHtml(row.best_model)}</td>
+        <td>${fmt(row.best_score)}</td>
+        <td>${fmt(row.mean_score)}</td>
+        <td>${fmt(row.mean_macro_f1_retrain)}</td>
+        <td>${fmt(row.mean_balanced_accuracy_retrain)}</td>
+        <td>${fmt(row.mean_prediction_accuracy)}</td>
+        <td>${fmt(row.mean_total_time_seconds)} s</td>
+        <td>${fmt(row.cumulative_total_time_seconds)} s</td>
+      </tr>`
+    )
+    .join("");
   const maxTime = Math.max(...result.results.map((row) => Number(row.total_benchmark_time_seconds || 0)), 1);
   const chartRows = result.results
+    .filter((row) => row.score !== null && row.score !== undefined)
     .map(
-      (row) => `
+      (row) => {
+        const metricSet = row.retrain || row.evaluation || {};
+        return `
       <div class="chartRow">
         <strong>${row.rank}. ${escapeHtml(row.model_kind)}</strong>
+        <span>${escapeHtml(row.model_family || "")} - ${escapeHtml(row.model_action || row.training_action || "")}</span>
         <div class="chartMetric"><span>Score ${fmt(row.score)}</span><div class="bar"><div style="width:${pct(row.score)}"></div></div></div>
         <div class="chartMetric"><span>Pred acc ${fmt(row.prediction_accuracy)} (${row.prediction_hits}/${row.prediction_count})</span><div class="bar okBar"><div style="width:${pct(row.prediction_accuracy)}"></div></div></div>
-        <div class="chartMetric"><span>Macro-F1 ${fmt(row.retrain?.macro_f1)}</span><div class="bar f1Bar"><div style="width:${pct(row.retrain?.macro_f1)}"></div></div></div>
+        <div class="chartMetric"><span>Macro-F1 ${fmt(metricSet.macro_f1)}</span><div class="bar f1Bar"><div style="width:${pct(metricSet.macro_f1)}"></div></div></div>
         <div class="chartMetric"><span>Tiempo ${fmt(row.total_benchmark_time_seconds)} s</span><div class="bar timeBar"><div style="width:${pct(Number(row.total_benchmark_time_seconds || 0) / maxTime)}"></div></div></div>
-      </div>`
+      </div>`;
+      }
     )
     .join("");
   const warnings = [];
-  if (Number(best.retrain?.macro_f1 || 0) < 0.5) {
+  const bestMetrics = best.retrain || best.evaluation || {};
+  if (Number(bestMetrics.macro_f1 || 0) < 0.5) {
     warnings.push("El mejor modelo tiene Macro-F1 bajo. Esto indica que, aunque acierte algunas predicciones de control, no separa bien todas las clases en holdout.");
   }
-  if (result.dataset === "kri_wifi" && Number(best.retrain?.macro_f1 || 0) < 0.3) {
+  if (result.dataset === "kri_wifi" && Number(bestMetrics.macro_f1 || 0) < 0.3) {
     warnings.push("Para KRI WiFi, este resultado suele indicar ventanas poco informativas o señal/noise mezclados. Usa seleccion de ventanas por energia RF, ventana IQ de 32768 o 65536 y mas ventanas por archivo antes de repetir el benchmark.");
   }
-  if (Number(best.prediction_accuracy || 0) - Number(best.retrain?.macro_f1 || 0) > 0.5) {
+  if (Number(best.prediction_accuracy || 0) - Number(bestMetrics.macro_f1 || 0) > 0.5) {
     warnings.push("Hay una diferencia grande entre prediccion de control y Macro-F1. Conviene aumentar 'Predicciones control' y revisar la matriz de confusion antes de concluir que el modelo identifica dispositivos de forma robusta.");
   }
   if (Number(best.stability_gap_macro_f1 || 0) > 0.1) {
     warnings.push("El gap entre train y retrain es alto. El resultado depende de la semilla o del split y necesita repetirse con mas semillas.");
+  }
+  if (result.family_comparison?.alert) {
+    warnings.push(result.family_comparison.alert);
   }
   const improvementPlan = buildImprovementPlan(result, best);
   state.improvementPlan = improvementPlan;
@@ -558,6 +752,7 @@ function renderRanking(result, options = {}) {
       <p>${escapeHtml(result.protocol?.ranking_score || "")}</p>
       <p>${escapeHtml(result.protocol?.data_budget || "")}</p>
       <p>Reporte: ${escapeHtml(result.benchmark_path || "")}</p>
+      <p>Markdown: ${escapeHtml(result.benchmark_markdown_path || "")}</p>
     </section>
     ${warningBlock}
     <section class="panel">
@@ -575,11 +770,18 @@ function renderRanking(result, options = {}) {
       <p>${escapeHtml(result.protocol?.timing || "")}</p>
     </section>
     <section class="panel matrix">
+      <h2>Ranking por familia</h2>
+      <table>
+        <thead><tr><th>#</th><th>Familia</th><th>Modelos</th><th>Mejor modelo</th><th>Mejor score</th><th>Score medio</th><th>Macro-F1 medio</th><th>Balanced acc media</th><th>Pred acc media</th><th>Tiempo medio</th><th>Tiempo acumulado</th></tr></thead>
+        <tbody>${familyRows || `<tr><td colspan="11">No hay familias evaluadas.</td></tr>`}</tbody>
+      </table>
+    </section>
+    <section class="panel matrix">
       <h2>Tabla comparativa completa</h2>
       <table>
         <thead>
           <tr>
-            <th>#</th><th>Modelo</th><th>Familia</th><th>Score</th><th>% pedido</th><th>Presupuesto</th><th>GB leidos est.</th><th>GB referenciados</th><th>% real ref.</th><th>Aciertos</th><th>Fallos</th><th>Pred acc</th>
+            <th>#</th><th>Modelo</th><th>Familia</th><th>Accion</th><th>Version</th><th>Seed</th><th>Fecha</th><th>Score</th><th>% pedido</th><th>Presupuesto</th><th>GB leidos est.</th><th>GB referenciados</th><th>% real ref.</th><th>Aciertos</th><th>Fallos</th><th>Pred acc</th>
             <th>Macro-F1 train</th><th>Macro-F1 retrain</th><th>Balanced acc retrain</th><th>Gap estabilidad</th>
             <th>Train</th><th>Retrain</th><th>Pred/media</th><th>Total</th>
           </tr>
@@ -603,7 +805,7 @@ function renderRanking(result, options = {}) {
       applyImprovementPlan();
       startOperation("compare", {
         ...params(),
-        model_kinds: Object.keys(state.modelCatalog),
+        model_kinds: selectedCompareModels(),
         prediction_limit: numberOrNull("predictionLimit") || 5,
       });
     });
@@ -708,13 +910,19 @@ function bind() {
   $("modelKind").addEventListener("change", loadReports);
   $("maxDataGb").addEventListener("input", renderDataBudgetPreview);
   $("maxDataPercent").addEventListener("input", renderDataBudgetPreview);
+  $("selectAllModelsBtn").addEventListener("click", () => {
+    document.querySelectorAll(".compareModelCheck").forEach((el) => { el.checked = true; });
+  });
+  $("clearModelsBtn").addEventListener("click", () => {
+    document.querySelectorAll(".compareModelCheck").forEach((el) => { el.checked = false; });
+  });
   $("presetBtn").addEventListener("click", applyDatasetPreset);
   $("discoverBtn").addEventListener("click", () => startOperation("discover"));
   $("trainBtn").addEventListener("click", () => startOperation("train"));
   $("compareBtn").addEventListener("click", () =>
     startOperation("compare", {
       ...params(),
-      model_kinds: Object.keys(state.modelCatalog),
+      model_kinds: selectedCompareModels(),
       prediction_limit: numberOrNull("predictionLimit") || 5,
     })
   );
